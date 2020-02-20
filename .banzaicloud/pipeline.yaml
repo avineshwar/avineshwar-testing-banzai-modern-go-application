@@ -1,0 +1,118 @@
+workspace:
+  base: /cicd
+pipeline:
+  create_cluster:
+    image: banzaicloud/ci-pipeline-client:0.12
+    cluster:
+      action: GetCluster
+      cloud: amazon
+      name: testingpki-west1-cluster2
+    action: EnsureCluster
+  test:
+    image: golang:1.13
+    commands: make check
+    environment:
+      GOFLAGS: -mod=readonly
+  build_image:
+    dockerfile: Dockerfile
+    enabled: true
+    image: plugins/docker
+    repo: '{{ .CICD_REPO }}'
+    secretFrom:
+      DOCKER_PASSWORD:
+        keyRef: password
+        name: cluster-1809-grafana
+      DOCKER_USERNAME:
+        keyRef: username
+        name: cluster-1809-grafana
+    tags: '{{ trunc 7 .CICD_COMMIT_SHA }}'
+  package_application:
+    when:
+      branch:
+        include:
+        - master
+    image: alpine/helm:2.14.2
+    commands:
+    - helm init --client-only
+    - helm repo add stable https://kubernetes-charts.storage.googleapis.com
+    - helm repo add banzaicloud-stable http://kubernetes-charts.banzaicloud.com/branch/master
+    - helm package ./.banzaicloud/charts/spotguide-modern-go-application
+  install_mysql_user_credentials_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-mysql'
+      namespace: default
+      sourceSecretName: avineshwar-testing-banzai-modern-go-application-mysql-user-credentials
+      spec:
+      - name: mysql-username
+        value: app
+      - name: mysql-password
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.12
+    when:
+      branch:
+        include:
+        - master
+  install_mysql_root_password_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-mysql'
+      namespace: default
+      sourceSecretName: avineshwar-testing-banzai-modern-go-application-mysql-root-password
+      spec:
+      - name: mysql-root-password
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.12
+    when:
+      branch:
+        include:
+        - master
+  deploy_application:
+    action: EnsureDeployment
+    deployment:
+      name: ./spotguide-modern-go-application-0.3.0.tgz
+      namespace: default
+      releaseName: '{{ .CICD_REPO_NAME }}'
+      reuseValues: true
+      timeout: 900
+      values:
+        config:
+          opencensus:
+            prometheus:
+              enabled: true
+        image:
+          pullPolicy: Always
+          repository: '{{ .CICD_REPO }}'
+          tag: '{{ trunc 7 .CICD_COMMIT_SHA }}'
+        ingress:
+          annotations:
+            kubernetes.io/ingress.class: traefik
+            traefik.ingress.kubernetes.io/redirect-permanent: "true"
+            traefik.ingress.kubernetes.io/redirect-regex: ^http://(.*)
+            traefik.ingress.kubernetes.io/redirect-replacement: https://$1
+          enabled: true
+          hosts:
+          - app-{{ .CICD_REPO_NAME }}.{{ .CLUSTER_NAME }}.{{ .ORG_NAME }}.{{ .DOMAIN_NAME }}
+        mysql:
+          database: app
+          enabled: true
+          existingSecret: '{{ .CICD_REPO_NAME }}-mysql'
+          metrics:
+            annotations:
+              prometheus.io/port: "9104"
+              prometheus.io/scrape: "true"
+            enabled: true
+            livenessProbe:
+              initialDelaySeconds: 200
+          mysqlDatabase: app
+          mysqlUser: app
+          port: null
+        nameOverride: '{{ .CICD_REPO_NAME }}'
+      wait: true
+    image: banzaicloud/ci-pipeline-client:0.12
+    when:
+      branch:
+        include:
+        - master
